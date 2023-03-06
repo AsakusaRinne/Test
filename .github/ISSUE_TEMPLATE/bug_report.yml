@@ -46,7 +46,3 @@ body:
       placeholder: Configuration
     validations:
       required: false
-  - type: textarea
-    attributes:
-      value: |
-        Thanks for reporting the problem to us!

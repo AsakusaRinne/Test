@@ -48,7 +48,3 @@ body:
       placeholder: Risks
     validations:
       required: false
-  - type: textarea
-    attributes:
-      value: |
-        Thanks for your contributing!
