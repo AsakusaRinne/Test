@@ -302,7 +302,7 @@ mobile::Module FlatbufferLoader::parseModule(
   storage_loaded_.resize(module->storage_data_size(), false);
 
   mobile_ivalue_size_ = module_->mobile_ivalue_size();
-  if (mobile_ivalue_size_ == 0) {
+  if (mobile_ivalue_size_ == 0 || mobile_ivalue_size_ > ivalues->size()) {
     mobile_ivalue_size_ = ivalues->size();
   }
 
@@ -755,8 +755,6 @@ mobile::Module parse_and_initialize_mobile_module(
     c10::optional<at::Device>,
     ExtraFilesMap* extra_files,
     bool should_copy_tensor_memory) {
-  TORCH_CHECK(
-      mobile::serialization::ModuleBufferHasIdentifier(data), "Format error");
   // TODO(T128189662): If not copying, enforce that data is aligned to
   // kFlatbufferDataAlignmentBytes, and add unit tests.
 

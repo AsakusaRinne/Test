@@ -10,7 +10,6 @@ if TYPE_CHECKING:
         reset_code,
         set_eval_frame,
         set_guard_error_hook,
-        set_guard_fail_hook,
         skip_code,
         unsupported,
     )
@@ -171,7 +170,7 @@ def mark_dynamic(t, index):
     1) torch._dynamo.config dynamic_shapes True or False.
         a) dynamic_shapes=True - dynamic_shapes must be True for mark_dynamic to work.
         a) dynamic_shapes=False - This config will raise an exception when used in conjunction with
-        mark_dyamic. We will eventually support this.
+        mark_dynamic. We will eventually support this.
 
     2) If the dimension is fully constrained - as in, it does not allow more than a single value
     in both eager (torch.compile, torch._dynamo.optimize) mode and export mode (torch._dynamo.export),
@@ -250,9 +249,9 @@ def mark_static_address(t, guard=True):
         raise TypeError(f"mark_static_address expects a tensor but recieved {type(t)}")
 
     if guard:
-        t._dynamo_static_input_type = "guarded"
+        t._dynamo_static_input_type = "guarded"  # type: ignore[attr-defined]
     else:
-        t._dynamo_static_input_type = "unguarded"
+        t._dynamo_static_input_type = "unguarded"  # type: ignore[attr-defined]
 
 
 # Note: this carefully avoids eagerly import einops.

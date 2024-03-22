@@ -1655,7 +1655,7 @@ def _max_pool(name, tuple_fn, ndims, return_indices):
         # To convert the indices to the same format used by Pytorch,
         # we first execute a maxpool with a kernel and stride of 1 on the same input.
         # This will result in a tensor of indices in which each index will have it's own value.
-        # Using this tensor as a reference, we extract the first index of each axis and substract
+        # Using this tensor as a reference, we extract the first index of each axis and subtract
         # it from each index of this axis in the indices to convert.
         # This step will result in a tensor were each dimension has values of indices within
         # the dimension it is in.
@@ -5416,10 +5416,12 @@ def _any(g: jit_utils.GraphContext, *args):
     if len(args) == 1:
         input = args[0]
         dim, keepdim = None, 0
-    # aten::any(Tensor self, int dim, bool keepdim)
+    # aten::any(Tensor self, int[]? dim, bool keepdim)
     else:
         input, dim, keepdim = args
-        dim = [symbolic_helper._parse_arg(dim, "i")]
+        # Can be int list or single int
+        dim = symbolic_helper._parse_arg(dim, "t")
+        dim = [int(d) for d in dim.view(-1)]
         keepdim = symbolic_helper._parse_arg(keepdim, "i")
     input = g.op("Cast", input, to_i=_C_onnx.TensorProtoDataType.INT64)
     input_sum = symbolic_helper._reducesum_helper(
@@ -5435,7 +5437,7 @@ def _all(g: jit_utils.GraphContext, *args):
     # aten::all(Tensor self)
     if len(args) == 1:
         return g.op("Not", _any(g, input))
-    # aten::all(Tensor self, int dim, bool keepdim)
+    # aten::all(Tensor self, int[]? dim, bool keepdim)
     else:
         return g.op("Not", _any(g, input, args[1], args[2]))
 
@@ -5994,7 +5996,7 @@ def linalg_vector_norm(
     dtype: torch._C.Value,
 ):
     # Conditions based on https://pytorch.org/docs/stable/generated/torch.linalg.vector_norm.html
-    if dim is None:
+    if symbolic_helper._is_none(dim):
         self = symbolic_helper._reshape_helper(g, self, [-1])
         keepdim = False
 
@@ -6006,6 +6008,10 @@ def linalg_vector_norm(
         return symbolic_helper._onnx_opset_unsupported_detailed(
             "linalg_vector_norm", 9, 11, "ord=0 not supported", self
         )
+    elif ord == 1:
+        result = _reduce_op_symbolic("ReduceL1")(g, self, dim=dim, keepdim=keepdim)
+    elif ord == 2:
+        result = _reduce_op_symbolic("ReduceL2")(g, self, dim=dim, keepdim=keepdim)
     else:
         ord_op = g.op("Constant", value_t=torch.tensor(ord, dtype=torch.float32))
         result = symbolic_helper._reducesum_helper(
@@ -6020,6 +6026,10 @@ def linalg_vector_norm(
                 ord_op,
             ),
         )
+
+    if not symbolic_helper._is_none(dtype):
+        dtype = symbolic_helper._get_const(dtype, "i", "dtype")
+        result = g.op("Cast", result, to_i=_type_utils.JitScalarType(dtype).onnx_type())  # type: ignore[arg-type]
     return result
 
 
@@ -6048,7 +6058,7 @@ def linalg_matrix_norm(
             # ord = 2/-2 unimplemented due to lack of operators
             # used to calculate singular values
             return symbolic_helper._unimplemented("linalg.matrix_norm", "ord==2", self)
-        # Wrap the dim vector to handle neagtive dim values
+        # Wrap the dim vector to handle negative dim values
         self_dim = symbolic_helper._get_tensor_rank(self)
         if self_dim is None:
             return symbolic_helper._unimplemented(
@@ -6155,13 +6165,14 @@ def meshgrid(g: jit_utils.GraphContext, tensor_list, indexing: Optional[str] = N
         raise errors.SymbolicValueError(
             f"Unsupported indexing: {indexing}", tensor_list
         )
+    unpacked_tensor_list = symbolic_helper._unpack_list(tensor_list)
     if indexing == "xy":
-        tensor_list[0], tensor_list[1] = tensor_list[1], tensor_list[0]
+        unpacked_tensor_list[:2] = unpacked_tensor_list[1::-1]
     tensors = [
         symbolic_helper._reshape_helper(
             g, t, g.op("Constant", value_t=torch.LongTensor([-1]))
         )
-        for t in symbolic_helper._unpack_list(tensor_list)
+        for t in unpacked_tensor_list
     ]
     tensors_shape = [g.op("Shape", t) for t in tensors]
     out_shape = g.op("Concat", *tensors_shape, axis_i=0)
@@ -7162,7 +7173,7 @@ def unsupported_complex_operators(g: jit_utils.GraphContext, input: _C.Value):
     # However, a few torch APIs (e.g. .tolist()) use complex operations when input is real,
     # which results in failures due to missing operators for complex numbers
 
-    # While `aten::_conj` and `aten::conj_phisical` raise exception when input is complex
+    # While `aten::_conj` and `aten::conj_physical` raise exception when input is complex
     if symbolic_helper.is_complex_value(input):
         # FIXME(justinchuby): report correct name for symbolic being executed
         return symbolic_helper._onnx_unsupported(

@@ -2,7 +2,11 @@
 #include "WorkersPool.h"
 #include "caffe2/core/logging.h"
 
+#if !defined(__s390x__) && !defined(__powerpc__)
 #include <cpuinfo.h>
+#else
+#include <thread>
+#endif
 
 C10_DEFINE_bool(
     caffe2_threadpool_force_inline,
@@ -41,6 +45,7 @@ namespace {
 }
 
 size_t getDefaultNumThreads() {
+#if !defined(__s390x__) && !defined(__powerpc__)
   auto numThreads = 1U;
   if (cpuinfo_initialize()) {
     numThreads = std::max(cpuinfo_get_processors_count(), 1U);
@@ -100,6 +105,9 @@ size_t getDefaultNumThreads() {
         break;
     }
   }
+#else
+  auto numThreads = std::max(std::thread::hardware_concurrency(), 1U);
+#endif
 
   if (FLAGS_pthreadpool_size) {
     // Always give precedence to explicit setting.

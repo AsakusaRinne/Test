@@ -2,15 +2,6 @@ name: Build Official Docker Images
 
 on:
   workflow_dispatch:
-    inputs:
-      channel:
-        description: "Channel to use (nightly, test, release)"
-        required: false
-        type: choice
-        default: test
-        options:
-          - release
-          - test
   pull_request:
     paths:
       - Dockerfile
@@ -20,10 +11,9 @@ on:
     branches:
       - nightly
     tags:
-      # Release candidate tags look like: v1.11.0-rc1
-      - v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+
+      # We want to run this build on final release tag
+      - v[0-9]+.[0-9]+.[0-9]+
       - ciflow/nightly/*
-
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
@@ -36,29 +26,45 @@ env:
   DOCKER_REGISTRY: ghcr.io
   NO_BUILD_SUFFIX: true
   USE_BUILDX: 1
-  WITH_PUSH: ${{ inputs.channel == 'release' }}
+  WITH_PUSH: ${{ github.event_name == 'push' && (github.event.ref == 'refs/heads/nightly' || (startsWith(github.event.ref, 'refs/tags/') && !startsWith(github.event.ref, 'refs/tags/ciflow/'))) }}
 
 jobs:
+  generate-matrix:
+    if: github.repository_owner == 'pytorch'
+    runs-on: [self-hosted, linux.large]
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout PyTorch
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@main
+        with:
+          fetch-depth: 1
+          submodules: true
+      - name: Get docker release matrix
+        id: generate-matrix
+        run: |
+          MATRIX_BLOB="$(python3 .github/scripts/generate_docker_release_matrix.py)"
+          echo "${MATRIX_BLOB}"
+          echo "matrix=${MATRIX_BLOB}" >> "${GITHUB_OUTPUT}"
+
   build:
     if: ${{ github.repository == 'pytorch/pytorch' }}
     runs-on: [self-hosted, linux.2xlarge]
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.event.ref, 'refs/tags/v')) && 'docker-build' || '' }}
     timeout-minutes: 240
+    needs: generate-matrix
     strategy:
-      matrix:
-        include:
-          # nvidia specific images don't exist for arm64 so only build the runtime image
-          - image_type: runtime
-            platform: linux/arm64,linux/amd64
-          - image_type: devel
-            platform: linux/amd64
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+      fail-fast: false
     env:
       BUILD_IMAGE_TYPE: ${{ matrix.image_type }}
       BUILD_PLATFORMS: ${{ matrix.platform }}
-      CHANNEL: ${{ inputs.channel }}
+      CUDA_VERSION: ${{ matrix.cuda_full_version }}
+      CUDA_VERSION_SHORT: ${{ matrix.cuda }}
+      CUDNN_VERSION: ${{ matrix.cudnn_version }}
     steps:
       - name: Setup SSH (Click me for login details)
-        uses: pytorch/test-infra/.github/actions/setup-ssh@release/2.1
+        uses: pytorch/test-infra/.github/actions/setup-ssh@release/2.2
         with:
           github-secret: ${{ secrets.GITHUB_TOKEN }}
       # [see note: pytorch repo ref]
@@ -71,7 +77,7 @@ jobs:
       - name: Setup Linux
         uses: ./.github/actions/setup-linux
       - name: Login to GitHub Container Registry
-        if: ${{ inputs.channel == 'release' }}
+        if: ${{ env.WITH_PUSH == 'true' }}
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
@@ -91,16 +97,14 @@ jobs:
           set -eou pipefail
           # To get QEMU binaries in our PATH
           echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
-          # Generate PyTorch version to use without suffix
+          # Generate PyTorch version to use
           echo "PYTORCH_VERSION=$(python3 .github/scripts/generate_pytorch_version.py --no-build-suffix)" >> "${GITHUB_ENV}"
-
-      - name: Setup release specific variables
+      - name: Setup nightly specific variables
+        if: ${{ github.event.ref == 'refs/heads/nightly' || startsWith(github.event.ref, 'refs/tags/ciflow/nightly/') }}
         run: |
           {
-            echo "INSTALL_CHANNEL=pytorch-test";
-            if [[ ${CHANNEL} == "release" ]]; then
-              echo "INSTALL_CHANNEL=pytorch";
-            fi
+            echo "DOCKER_IMAGE=pytorch-nightly";
+            echo "INSTALL_CHANNEL=pytorch-nightly";
             echo "TRITON_VERSION=$(cut -f 1 .ci/docker/triton_version.txt)+$(cut -c -10 .ci/docker/ci_commit_pins/triton.txt)";
           } >> "${GITHUB_ENV}"
       - name: Run docker build / push
@@ -110,10 +114,11 @@ jobs:
       - name: Push nightly tags
         if: ${{ github.event.ref == 'refs/heads/nightly' && matrix.image_type == 'runtime' }}
         run: |
-          PYTORCH_DOCKER_TAG="${PYTORCH_VERSION}-runtime"
-          CUDA_VERSION=$(python3 -c "import re;print(re.search('CUDA_VERSION\s+=\s+([0-9\.]+)',open('docker.Makefile').read())[1],end='')")
+          PYTORCH_DOCKER_TAG="${PYTORCH_VERSION}-cuda$(CUDA_VERSION_SHORT)-cudnn$(CUDNN_VERSION)-runtime"
+
           PYTORCH_NIGHTLY_COMMIT=$(docker run ghcr.io/pytorch/pytorch-nightly:"${PYTORCH_DOCKER_TAG}" \
                                           python -c 'import torch; print(torch.version.git_version[:7],end="")')
+
           docker tag ghcr.io/pytorch/pytorch-nightly:"${PYTORCH_DOCKER_TAG}" \
                  ghcr.io/pytorch/pytorch-nightly:"${PYTORCH_NIGHTLY_COMMIT}-cu${CUDA_VERSION}"
           docker push ghcr.io/pytorch/pytorch-nightly:"${PYTORCH_NIGHTLY_COMMIT}-cu${CUDA_VERSION}"
@@ -122,5 +127,5 @@ jobs:
                  ghcr.io/pytorch/pytorch-nightly:latest
           docker push ghcr.io/pytorch/pytorch-nightly:latest
       - name: Teardown Linux
-        uses: pytorch/test-infra/.github/actions/teardown-linux@release/2.1
+        uses: pytorch/test-infra/.github/actions/teardown-linux@release/2.2
         if: always()
